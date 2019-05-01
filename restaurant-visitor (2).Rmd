@@ -146,7 +146,7 @@ test <-
 
 # Overview: 
 
-In the first step, we use the function summary and the function glimpse to overview the data
+In the first step, we use the function summary and the  glimpse to overview the data
 
 ## Air visits
 
