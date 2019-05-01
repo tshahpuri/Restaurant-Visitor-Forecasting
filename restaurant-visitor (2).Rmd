@@ -210,7 +210,7 @@ glimpse(store_ids)
 
 ## Reformating features
 
-For exploration purposes, we need to make some changes to the date format.
+Because we want to do more exploration, we need to make some changes to the date format.
 
 ```{r}
 air_visits <- air_visits %>%
