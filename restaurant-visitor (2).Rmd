@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo=TRUE, error=FALSE)
 
 # Introduction
 
-This is a class project for the class STAT 380.
+This is our project for class stat 380.
 
 The main purpose of this project is to predict the number of future restaurant visitor for a restraunt in Japan.
 
