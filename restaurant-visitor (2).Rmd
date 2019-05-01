@@ -1,0 +1,1016 @@
+---
+title: 'Restaurant Visitor Prediction'
+date: '`r Sys.Date()`'
+output:
+    html_notebook
+---
+
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo=TRUE, error=FALSE)
+```
+
+# Introduction
+
+This is a class project for the class STAT 380.
+
+The main purpose of this project is to predict the number of future restaurant visitor for a restraunt in Japan.
+
+Later on in the project, we would also join a dataset with weather stations in Japan to see the impact of weather on visitors.
+
+The the first dataset comes from Recruit Restraunt Challenge on Kaggle which has data from Japanese restaurants.
+
+The dataset has the following files:
+
+- air_visit_data.csv: This file contains the the air restaurants historical data. It is the primary training data set.
+
+- air_reserve.csv / hpg_reserve.csv: This file contains the data about bookings done through through the air / HPG systems.
+
+- air_store_info.csv / hpg_store_info.csv: This file contains information about air / HPG restaurants, including type and location.
+
+- store_id_relation.csv: This file is used to connect the air and hpg files by joining on ids
+
+- date_info.csv: This file contains data regarding Japanese vacations.
+
+
+# Preparations {.tabset .tabset-fade .tabset-pills}
+
+
+## Load libraries
+
+
+```{r, echo = FALSE}
+# data manipulation
+library('forcats') 
+library('readr') 
+library('tibble') 
+library('tidyr') 
+library('stringr')
+library('broom') 
+library('dplyr') 
+library('purrr') 
+library('data.table')
+library('lazyeval') 
+
+# visualisation
+library('ggplot2')
+library('scales') 
+library('grid') 
+library('gridExtra') 
+library('RColorBrewer') 
+library('corrplot') 
+library('ggrepel') 
+library('ggridges') 
+library('ggExtra') 
+library('ggforce') 
+library('viridis') 
+
+# Libraries for loading Maps / geospatial data
+library('maps') 
+library('leaflet') 
+library('leaflet.extras') 
+library('geosphere')
+
+# Packages to handle Dates plus forecast package from facebook
+library('tseries') 
+library('lubridate')
+library('prophet') 
+library('timeDate') 
+library('timetk') 
+library('forecast') 
+```
+
+## Helper functions
+
+Here we create a use defined fuction for multiple plots and also a helper fuction for binomial confidence interval.
+
+```{r}
+# We created this fuction for plotting multiple plot
+# Objects can be passed in the fuction
+# The output would be multiple plots
+
+multiple_plot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  figure <- 
+    c(list(...), plotlist)
+  num_of_plots = length(figure)
+  if (is.null(layout)) {
+    layout <- matrix(seq(1, cols * ceiling(num_of_plots/cols)),
+                    ncol = cols, nrow = ceiling(num_of_plots/cols))
+  }
+ if (num_of_plots==1) {
+    print(figure[[1]])
+
+  } else {
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    for (i in 1:num_of_plots) {
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      print(figure[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+
+## Load data
+
+For faster speed up of data reading, we used as.tibble()
+
+```{r warning=FALSE, results=FALSE}
+rpath <- 
+  "recruit-restaurant-visitor-forecasting/"
+wpath <- 
+  "rrv-weather-data/"
+wdpath <- 
+  "rrv-weather-data/1-1-16_5-31-17_Weather/"
+  
+air_reserve <- 
+  as.tibble(fread(str_c(rpath,'air_reserve.csv')))
+store_ids <- 
+  as.tibble(fread(str_c(rpath,'store_id_relation.csv')))
+hpg_store <- 
+  as.tibble(fread(str_c(rpath,'hpg_store_info.csv')))
+air_visits <- 
+  as.tibble(fread(str_c(rpath,'air_visit_data.csv')))
+air_store <- 
+  as.tibble(fread(str_c(rpath,'air_store_info.csv')))
+hpg_reserve <- 
+  as.tibble(fread(str_c(rpath,'hpg_reserve.csv')))
+vacations <- 
+  as.tibble(fread(str_c(rpath,'date_info.csv')))
+test <- 
+  as.tibble(fread(str_c(rpath,'sample_submission.csv')))
+```
+
+
+# Overview: 
+
+In the first step, we use the function summary and the function glimpse to overview the data
+
+## Air visits
+
+```{r}
+summary(air_visits)
+glimpse(air_visits)
+air_visits %>% 
+  distinct(air_store_id) %>% 
+  nrow()
+```
+
+## Air Reserve
+
+```{r}
+summary(air_reserve)
+glimpse(air_reserve)
+air_reserve %>% 
+  distinct(air_store_id) %>% 
+  nrow()
+```
+
+## HPG Reserve
+
+```{r}
+summary(hpg_reserve)
+glimpse(hpg_reserve)
+hpg_reserve %>% 
+  distinct(hpg_store_id) %>% 
+  nrow()
+```
+
+
+## Air Store
+
+```{r}
+summary(air_store)
+glimpse(air_store)
+```
+
+## HPG Store
+
+```{r}
+summary(hpg_store)
+glimpse(hpg_store)
+```
+
+
+## Holidays
+
+```{r}
+summary(vacations)
+glimpse(vacations)
+```
+
+## Store IDs
+
+```{r}
+summary(store_ids)
+glimpse(store_ids)
+```
+
+## Reformating features
+
+For exploration purposes, we need to make some changes to the date format.
+
+```{r}
+air_visits <- air_visits %>%
+  mutate(visit_date = ymd(visit_date))
+
+air_store <- air_store %>%
+  mutate(air_genre_name = as.factor(air_genre_name),
+         air_area_name = as.factor(air_area_name))
+
+hpg_reserve <- hpg_reserve %>%
+  mutate(visit_datetime = ymd_hms(visit_datetime),
+         reserve_datetime = ymd_hms(reserve_datetime))
+
+
+vacations <- vacations %>%
+  mutate(holiday_flg = as.logical(holiday_flg),
+         date = ymd(calendar_date))
+
+hpg_store <- hpg_store %>%
+  mutate(hpg_genre_name = as.factor(hpg_genre_name),
+         hpg_area_name = as.factor(hpg_area_name))
+
+
+air_reserve <- air_reserve %>%
+  mutate(visit_datetime = ymd_hms(visit_datetime),
+         reserve_datetime = ymd_hms(reserve_datetime))
+```
+
+
+# Individual feature visualisations
+
+First, we will examine the distribution of features in a single data file. This initial visualization will be the basis of our analysis.
+
+## Air Visits
+First, we will sart with the number of visits to the air restaruants.
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 1", out.width="100%"}
+air_1 <- air_visits %>%
+  group_by(visit_date) %>%
+  summarise(all_visitors = sum(visitors)) %>%
+  ggplot(aes(visit_date, all_visitors)) +
+  labs(y = "Visitors", x = "Time") +
+  geom_line(col = "red")
+
+air_2 <- air_visits %>%
+  ggplot(aes(visitors)) +
+  geom_vline(xintercept = 20, color = "yellow") +
+  geom_histogram(fill = "red", bins = 30) +
+  scale_x_log10()
+
+air_3 <- air_visits %>%
+  mutate(wday = wday(visit_date, label = TRUE)) %>%
+  group_by(wday) %>%
+  summarise(visits = median(visitors)) %>%
+  ggplot(aes(wday, visits, fill = wday)) +
+  geom_col() + 
+  theme(legend.position = "none", 
+        axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9)) +
+  labs(x = "Day", y = "Median Customers")
+
+air_4 <- air_visits %>%
+  mutate(month = month(visit_date, label = TRUE)) %>%
+  group_by(month) %>%
+  summarise(visits = median(visitors)) %>%
+  ggplot(aes(month, visits, fill = month)) +
+  geom_col() +
+  theme(legend.position = "none") +
+  labs(x = "Month of Year", y = "Median Customers")
+
+layout <- matrix(c(1,1,1,1,2,3,4,4),2,4,byrow=TRUE)
+multiple_plot(air_1,air_2, air_3, air_4, layout=layout)
+```
+
+As we can see from the plots,
+
+1) There is some kind of a step structure when we look at the whole time-series. It could be because of upcoming restraunts or could just be a pattern. 
+
+2) Each restaurant serves around 20 people at most every day. Sometimes it goes to 100, and in rare cases it could go to more than 100.
+
+3) As we expected, the number of visitors on Friday and weekend is the largest, while the number of visitors on Monday and Tuesday is relatively small.
+
+4) For the whole year, December seems to be the month with most visitors. 
+From March to May there were a lot of people
+
+## Air Reservations
+
+Now, we'll compare the booking data to the actual number of visitors, we'll start by looking at "air" restaurants. 
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 3", out.width="100%"}
+foo <- air_reserve %>%
+  mutate(reserve_date = date(reserve_datetime),
+         visit_hour = hour(visit_datetime),
+         diff_hour = time_length(visit_datetime - reserve_datetime, unit = "hour"),
+         diff_day = time_length(visit_datetime - reserve_datetime, unit = "day"),
+         visit_date = date(visit_datetime),
+         reserve_wday = wday(reserve_datetime, label = TRUE),
+         reserve_hour = hour(reserve_datetime),
+         visit_wday = wday(visit_datetime, label = TRUE)
+         )
+
+plot_1 <- foo %>%
+  group_by(visit_date) %>%
+  summarise(all_visitors = sum(reserve_visitors)) %>%
+  ggplot(aes(visit_date, all_visitors)) +
+  geom_line() +
+  labs(x = "'air' visit date")
+
+plot_2 <- foo %>%
+  group_by(visit_hour) %>%
+  summarise(all_visitors = sum(reserve_visitors)) %>%
+  ggplot(aes(visit_hour, all_visitors)) +
+  geom_col(fill = "green")
+
+layout <- matrix(c(1,1,2,3),2,2,byrow=TRUE)
+multiple_plot(plot_1, plot_2, layout=layout)
+```
+
+We can see from the graph above,
+
+1) The number of booked through the "air" "system dropped dramatically in 2016. Bookings for that year didn't increase until the end of the year. Visitor Numbers remained strong in 2017. The decline we saw after the first quarter.
+
+2) Also, we can see from the data that there are  more reservations for dinner from about 6 to 9 p.m.
+
+## HPG Reservations
+
+Next, we analyse the hpg data.
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 4", out.width="100%"}
+foo <- hpg_reserve %>%
+  mutate(reserve_date = date(reserve_datetime),
+         visit_hour = hour(visit_datetime),
+         diff_hour = time_length(visit_datetime - reserve_datetime, unit = "hour"),
+         diff_day = time_length(visit_datetime - reserve_datetime, unit = "day"),
+         visit_date = date(visit_datetime),
+         reserve_wday = wday(reserve_datetime, label = TRUE),
+         reserve_hour = hour(reserve_datetime),
+         visit_wday = wday(visit_datetime, label = TRUE)
+         )
+
+plot_1 <- foo %>%
+  group_by(visit_date) %>%
+  summarise(all_visitors = sum(reserve_visitors)) %>%
+  ggplot(aes(visit_date, all_visitors)) +
+  geom_line() +
+  labs(x = "'hpg' date")
+
+plot_2 <- foo %>%
+  group_by(visit_hour) %>%
+  summarise(all_visitors = sum(reserve_visitors)) %>%
+  ggplot(aes(visit_hour, all_visitors)) +
+  geom_col(fill = "pink")
+
+plot_3 <- foo %>%
+  filter(diff_hour < 24*5) %>%
+  group_by(diff_hour) %>%
+  summarise(all_visitors = sum(reserve_visitors)) %>%
+  ggplot(aes(diff_hour, all_visitors)) +
+  geom_col(fill = "red") +
+  labs(x = "Time for reservation to visit in hours")
+
+layout <- matrix(c(1,1,2,3),2,2,byrow=TRUE)
+multiple_plot(plot_1, plot_2, plot_3, layout=layout)
+```
+
+We can see
+
+1) As we can see from the data of "air", in December 2016, the number of visits after booking showed an obvious peak, showing a more orderly pattern.
+
+2) Again, here most reservations are for dinner.
+
+3) In addition, in the last few hours before the visit, the transaction volume here is not larger than the 24 or 48 hours before the visit.
+
+
+## Air Store
+
+After visualization, let's look at the spatial information.
+
+This is a fully interactive and scalable map of all the "air" restaurants. 
+
+It is from the leaflet package.
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 5", out.width="100%"}
+leaflet(air_store) %>%
+  addTiles() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addMarkers(~longitude, ~latitude,
+             popup = ~air_store_id, label = ~air_genre_name,
+             clusterOptions = markerClusterOptions())
+```
+
+
+Next, we are going to plot the number of different types of cuisine with the area that has the most air restaurants:
+
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 6", out.width="100%"}
+plot_1 <- air_store %>%
+  group_by(air_genre_name) %>%
+  count() %>%
+  ggplot(aes(reorder(air_genre_name, n, FUN = min), n, fill = air_genre_name)) +
+  geom_col() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  labs(x = "Type of cuisine", y = "Number of air restaurants")
+
+plot_2 <- air_store %>%
+  group_by(air_area_name) %>%
+  count() %>%
+  ungroup() %>%
+  top_n(15,n) %>%
+  ggplot(aes(reorder(air_area_name, n, FUN = min) ,n, fill = air_area_name)) +
+  geom_col() +
+  theme(legend.position = "none") +
+  coord_flip() +
+  labs(x = "Top 15 areas", y = "Number of air restaurants")
+
+layout <- matrix(c(1,2),2,1,byrow=TRUE)
+multiple_plot(plot_1, plot_2, layout=layout)
+```
+
+We can see,
+
+1) There the largest number of restraunts is Izakaya, the second largest is a Cafe. The least number of restraunts is "Karoke", "international" or "Asian".
+
+2) Fukuoka has the most "air" restaurants, followed by Tokyo.
+
+## HPG Store
+Using the same method above, we can make a map of "HPG":
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 7", out.width="100%"}
+leaflet(hpg_store) %>%
+  addTiles() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addMarkers(~longitude, ~latitude,
+             popup = ~hpg_store_id, label = ~hpg_genre_name,
+              clusterOptions = markerClusterOptions())
+```
+
+
+Here is the breakdown of *genre* and *area* for the *hpg* restaurants:
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 8", out.width="100%"}
+plot_1 <- hpg_store %>%
+  group_by(hpg_genre_name) %>%
+  count() %>%
+  ggplot(aes(reorder(hpg_genre_name, n, FUN = min), n, fill = hpg_genre_name)) +
+  geom_col() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  labs(x = "Type of cuisine", y = "Number of hpg restaurants")
+
+plot_2 <- hpg_store %>%
+  mutate(area = str_sub(hpg_area_name, 1, 20)) %>%
+  group_by(area) %>%
+  count() %>%
+  ungroup() %>%
+  top_n(15,n) %>%
+  ggplot(aes(reorder(area, n, FUN = min) ,n, fill = area)) +
+  geom_col() +
+  theme(legend.position = "none") +
+  coord_flip() +
+  labs(x = "Top 15 areas", y = "Number of hpg restaurants")
+
+layout <- matrix(c(1,2),1,2,byrow=TRUE)
+multiple_plot(plot_1, plot_2, layout=layout)
+```
+
+We can see,
+
+1) When compared with "air" restaurants, "HPG" contains more types of restaurants, and "Japanese style" seems to contain more specific categories in "air" data.
+
+2) Tokyo and Osaka again feature prominently in the top 15 cities, as we found in the "air" data.
+
+
+# Feature relations
+
+## Visitors per genre
+
+For the first one, we will use the multi-feature space diagram to study the relationship between the types of cuisine and the number of tourists.
+
+
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 11", out.width="100%"}
+
+foo <- air_visits %>%
+  left_join(air_store, by = "air_store_id")
+
+foo %>%
+  group_by(visit_date, air_genre_name) %>%
+  summarise(mean_visitors = mean(visitors)) %>%
+  ungroup() %>%
+  ggplot(aes(visit_date, mean_visitors, color = air_genre_name)) +
+  geom_line() +
+  labs(y = "Average number of visitors to 'air' restaurants", x = "Date") +
+  theme(legend.position = "none") +
+  scale_y_log10() +
+  facet_wrap(~ air_genre_name)
+```
+
+We can see:
+
+1) In general, the average number of customers per day for each type is 10 to 100. Similarly, in each category, long-term trends look fairly stable. Since the end of 2016, the popularity of "creative cuisine" and "Okonomiyaki" has been on the rise, while the popularity of "Asian cuisine" has been on the decline.
+
+2) Although "Asian" restaurants are rare, they seem to be popular.
+
+
+## The impact of vacations
+
+
+Now let's study the effect of vacations on visitor Numbers:
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 13", fig.height=3.5, out.width="100%"}
+
+foo <- air_visits %>%
+  mutate(calendar_date = as.character(visit_date)) %>%
+  left_join(vacations, by = "calendar_date")
+
+plot_1 <- foo %>%
+  ggplot(aes(holiday_flg, visitors, color = holiday_flg)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  theme(legend.position = "none")
+
+plot_2 <- foo %>%
+  mutate(wday = wday(date, label = TRUE)) %>%
+  group_by(wday, holiday_flg) %>%
+  summarise(mean_visitors = mean(visitors)) %>%
+  ggplot(aes(wday, mean_visitors, color = holiday_flg)) +
+  geom_point(size = 4) +
+  theme(legend.position = "none") +
+  labs(y = "Average number of visitors")
+
+layout <- matrix(c(1,2),1,2,byrow=TRUE)
+multiple_plot(plot_1, plot_2, layout=layout)
+```
+
+
+
+We can see:
+
+1) Overall, vacations had no effect on average visitor Numbers (left graph). 
+
+2) Although holiday on a weekend has little to no impact on the visitor numbers. It even decreases them slightly. This is an interesting phenomenon. (right graph).
+
+## Restaurants per area and the effect on visitor numbers
+
+Here is a interesting idea that we want to study with,
+
+If we had the only gourmet bar in the area and it was popular, we'd have hundreds of customers and we wouldn't worry about losing them. But if there are more than 10 restaurants of the same type on this street, even if we do our best, some customers will go elsewhere. So let's look at the impact of the number of specific restaurant types in each region on the number of customers
+
+
+We first outlined the frequency of each region specific type for the two datasets air and HPG store. The size of the dot is proportional to the number of cases:
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 14", out.width="100%"}
+
+air_store %>%
+  mutate(area = str_sub(air_area_name, 1, 12)) %>%
+  ggplot(aes(area, air_genre_name)) +
+  geom_count(colour = "green") +
+  theme(legend.position = "bottom", axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9))
+
+```
+
+We can see:
+
+1) Some areas have a wide variety of restaurants, while others have only one air restaurant.
+
+2) Similarly, cuisines such as izakaya or cafe are very common, while others can only be found in a few areas.
+
+Graphs of the same type for HPG data look similar, but are busier because of the greater number of types.
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 15", out.width="100%"}
+
+hpg_store %>%
+  mutate(area = str_sub(hpg_area_name, 1, 10)) %>%
+  ggplot(aes(area, hpg_genre_name)) +
+  geom_count(colour = "blue") +
+  theme(legend.position = "bottom", axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9))
+
+```
+
+
+
+We can see,
+
+1) There are also busy areas with many restaurants and areas with only a few restaurants.
+
+2) Both "Japanese cuisine" and "international cuisine" are common and popular. "Entertainment bars" and "udon/buckwheat noodles" are rare, as are "Shanghai cuisine" and "dim sum".
+
+
+We start with the air data:
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 16", out.width="100%"}
+
+air_store %>%
+  group_by(air_genre_name, air_area_name) %>%
+  count() %>%
+  ggplot(aes(reorder(air_genre_name, n, FUN = mean), n)) +
+  geom_boxplot() +
+  geom_jitter(color = "blue") +
+  scale_y_log10() +
+  coord_flip() +
+  labs(x = "Air genre", y = "Occurences per air area")
+```
+
+
+
+We can see:
+
+1) Only a few types have a median of more than two restaurants in one area. For instance, "Italian/French" restaurants or "Bar/Cocktail" places,  are easier to be found with more than two in the same area.
+
+2) For most types, the distribution is firmly clustered in each area of 2 cases and scattered toward higher Numbers. The number of "cafes" is highest, with 26 in one area.
+
+3) Strangely enough, the minimum here is 2, not 1. This means that no "air" restaurant is the only one in any region. 
+
+```{r}
+
+air_store %>%
+  filter(air_store_id == "air_b5598d12d1b84890" | air_store_id == "air_bbe1c1a47e09f161")
+
+air_visits %>%
+  filter(air_store_id == "air_b5598d12d1b84890" | air_store_id == "air_bbe1c1a47e09f161") %>%
+  arrange(visit_date) %>%
+  head(10)
+
+```
+
+Now we look at the same distribution for the HPG restaurants:
+
+
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 17", out.width="100%"}
+
+foobar <- hpg_store %>%
+  group_by(hpg_genre_name, hpg_area_name) %>%
+  count()
+
+foobar %>%
+  ggplot(aes(reorder(hpg_genre_name, n, FUN = mean), n)) +
+  geom_boxplot() +
+  geom_jitter(color = "red") +
+  scale_y_log10() +
+  coord_flip() +
+  labs(x = "hpg genre", y = "Cases per hpg area")
+```
+
+We can see:
+
+1) Here, we obviously have a min of one type  per region, and because of the high overall number, there is also more diversity in the median case.
+
+2)The most extreme "genre" is "Japanese style", with an average of more than 10 restaurants per region. 
+
+Using information about the number of types of restraunts in each area, we can now quantify the clustering or "crowding" of the dataset and correlate it with the number of visitors. The next figure first shows the overall distribution of air and HPG data points in the first two figures/
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 18", out.width="100%"}
+
+foo <- air_visits %>%
+  left_join(air_store, by = "air_store_id")
+
+bar <- air_store %>%
+  group_by(air_genre_name, air_area_name) %>%
+  count()
+
+foobar <- hpg_store %>%
+  group_by(hpg_genre_name, hpg_area_name) %>%
+  count()
+
+plot_1 <- bar %>%
+  ggplot(aes(n)) +
+  geom_histogram(fill = "black", binwidth = 1) +
+  labs(x = "Air genres per area")
+
+plot_2 <- foobar %>%
+  ggplot(aes(n)) +
+  geom_histogram(fill = "red", binwidth = 1) +
+  labs(x = "HPG genres per area")
+
+plot_3 <- foo %>%
+  group_by(air_genre_name, air_area_name) %>%
+  summarise(mean_log_visit = mean(log1p(visitors))) %>%
+  left_join(bar, by = c("air_genre_name","air_area_name")) %>%
+  group_by(n) %>%
+  summarise(mean_mlv = mean(mean_log_visit),
+            sd_mlv = sd(mean_log_visit)) %>%
+  replace_na(list(sd_mlv = 0)) %>%
+  ggplot(aes(n, mean_mlv)) +
+  geom_point(color = "black", size = 4) +
+  geom_errorbar(aes(ymin = mean_mlv - sd_mlv, ymax = mean_mlv + sd_mlv), width = 0.5, size = 0.7, color = "blue") +
+  labs(x = "Cases of identical Air genres per area", y = "Mean +/- SD of\n mean log1p visitors")
+
+layout <- matrix(c(1,2,3,3),2,2,byrow=TRUE)
+
+multiple_plot(plot_1, plot_2, plot_3, layout=layout)
+
+```
+
+
+# Forecasting methods and examples
+
+Finally, we will run our time series prediction models We learned a lot about datasets and their attributes. The following sections describe the basic forecasting methods. 
+
+## ARIMA / auto.arima
+
+Autoregressive integrated moving average model is a popular method for forecasting. This model consists of three building blocks, three index p, d, q parameterized as ARIMA(p, d, q)
+
+In this project, we will implement the "auto-arima" tool, that estimates the necessary arima parameters for each individual time series.
+
+Also, we'll implement the need to use the "ts" tool to convert them into time series objects. 
+
+We use the air_store_id* ("air_ba937bf13d40fb24") as an example.
+
+```{r}
+air_id = "air_ba937bf13d40fb24"
+```
+
+To test our predictions, we will follow the same time frame as our final task (April 23-may 31). Here, we automatically extract the 39 days from the length of the predicted range of *test* and define it as our "predicted length".
+
+```{r}
+pred_len <- test %>%
+  separate(id, c("air", "store_id", "date"), sep = "_") %>%
+  distinct(date) %>%
+  nrow()
+```
+
+We selected a "training" sample that predicted the final 39 days. We calculate the top end of our training date and subtract our "predicted length" from this value to define the validation sample at the beginning of March 14. We also created a data set that contains all of visit_date to prepare for many time series that contain gaps.
+
+```{r}  
+max_date <- max(air_visits$visit_date)
+split_date <- max_date - pred_len
+all_visits <- tibble(visit_date = seq(min(air_visits$visit_date), max(air_visits$visit_date), 1))
+```
+
+
+Next, we extract the time series for a particular air_store_id*. 
+
+```{r}
+foo <- air_visits %>%
+  filter(air_store_id == air_id)
+
+visits <- foo %>%
+  right_join(all_visits, by = "visit_date") %>%
+  mutate(visitors = log1p(visitors)) %>%
+  replace_na(list(visitors = median(log1p(foo$visitors)))) %>%
+  rownames_to_column()
+```
+
+Now, we divide the data into training and testing sets.
+
+```{r}
+visits_train <- visits %>% filter(visit_date <= split_date)
+visits_valid <- visits %>% filter(visit_date > split_date)
+```
+
+
+Now comes the fitting part.
+
+```{r}
+arima.fit <- auto.arima(tsclean(ts(visits_train$visitors, frequency = 7)),
+                        stepwise = FALSE, approximation = FALSE)
+```
+
+
+Using the fitted ARIMA model, we will "forecast" our "predicted length". At this point we include the confidence interval.
+
+```{r}
+arima_visits <- arima.fit %>% forecast(h = pred_len, level = c(50,95))
+```
+
+
+Finally, we plot our prediction. 
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 31", out.width="100%"}
+
+arima_visits %>%
+  autoplot +
+  geom_line(aes(as.integer(rowname)/7, visitors), 
+            data = visits_valid, color = "grey") +
+  labs(x = "Time ", y = " Visitors vs auto.arima predictions")
+
+```
+
+We found that the predictions from the first few days were very consistent.
+
+## Prophet
+
+The Prophet forecasting tool is an open-source software released by Facebook's core data science team. It is a useful tool for both R and Python.
+
+Let's look at this tool step by step again. We will build on the work of the ARIMA section and will not repeat any of the explanations that can be found earlier.
+
+We will again create a set of training and validation for the same time period as above. The only difference in our ARIMA approach is: 
+
+
+```{r message=FALSE, error=FALSE}
+
+air_id = "air_ba937bf13d40fb24"
+
+pred_len <- test %>%
+  separate(id, c("air", "store_id", "date"), sep = "_") %>%
+  distinct(date) %>%
+  nrow()
+
+max_date <- max(air_visits$visit_date)
+split_date <- max_date - pred_len
+all_visits <- tibble(visit_date = seq(min(air_visits$visit_date), max(air_visits$visit_date), 1))
+
+foo <- air_visits %>%
+  filter(air_store_id == air_id)
+
+visits <- foo %>%
+  right_join(all_visits, by = "visit_date") %>%
+  mutate(visitors = log1p(visitors)) %>%
+  rownames_to_column() %>%
+  select(y = visitors,
+         ds = visit_date)
+
+visits_train <- visits %>% filter(ds <= split_date)
+visits_valid <- visits %>% filter(ds > split_date)
+```
+
+
+Here we fit the prophet model and make the forecast:
+
+```{r}
+proph <- prophet(visits_train, changepoint.prior.scale=0.5, yearly.seasonality=FALSE)
+future <- make_future_dataframe(proph, periods = pred_len)
+fcast <- predict(proph, future)
+```
+
+
+This is the prophet forecast plot:
+
+```{r fig.align = 'default', warning = FALSE, fig.cap ="Fig. 32", out.width="100%"}
+plot(proph, fcast)
+```
+
+Observations are represented by black dots, fitting models and predictions by blue lines. In the light blue, we see corresponding uncertainty.
+
+Prophet provides a breakdown graph where we check for additional components to the model: trends, annual seasonality (if any), and weekly cycles:
+
+
+
+```{r fig.align = 'default', warning = FALSE, fig.cap ="Fig. 33", out.width="100%"}
+prophet_plot_components(proph, fcast)
+```
+
+
+
+As, We can see:
+
+1) The weekly change pattern detected by wevin is similar to what we found before. For example, Friday/Saturday has more customers than any other time of the week. But, the difference is,the average number of visitors to Sun is lower than at any other time. 
+
+2) But the long-term trend is different from what we've seen before. The previous average behavior was more likely to have risen around December 2016, but in this case, it appears to have occurred in mid-2016.
+
+
+## Weather time series
+
+We will now look at an example of the weather data from a Japan Station. We'll select the station `tokyo__tokyo-kana__tonokyo.csv` as is has data for most features but not all. Remember that the individual weather data files are in the folder `1-1-16_5-31-17_Weather`.
+
+
+```{r}
+weather_data <- as.tibble(fread(str_c(wdpath,"tokyo__tokyo-kana__tonokyo.csv")))
+summary(weather_data)
+glimpse(weather_data)
+```
+
+As, we can see:
+
+1) Our train and test sets are covered by daily data for the 517 days. These data include information such as temperature, rain, snow, air pressure, and even cloud cover or sunlight hours.
+
+2) We see that some features include mostly NA. In fact, this specific weather station data set is one of the more complete ones and you will find many more missing values in other stations. Some stations appear to have essentially complete feature data. This makes it necessary to focus on the overall common features in a first modelling approach.
+
+We will do a little bit of formatting to add some date features like month or day of the week:
+
+```{r}
+weather_data <- weather_data %>%
+  mutate(date = ymd(calendar_date),
+         wday = wday(date, label = TRUE, abbr = TRUE),
+         month = month(date, label = TRUE, abbr = TRUE),
+         week = week(date)) %>%
+  select(-calendar_date)
+```
+
+The monthly statistics for high temperature and average humidity. 
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 41", out.width="100%"}
+p1 <- weather_data %>%
+  ggplot(aes(x = high_temperature, y = fct_rev(month), fill = ..x..)) +
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01, gradient_lwd = 1., bandwidth = 1.4) +
+  scale_fill_viridis(name = "T_max [°C]", option = "C") +
+  ggtitle("Maximum temperature at station \ntokyo tokyo-kana tonokyo in 2016/17") +
+  labs(x = "High temperature", y = "") +
+  theme_ridges(font_size = 13, grid = TRUE) +
+  theme(legend.position = "none") +
+  theme(axis.title.y = element_blank())
+
+p2 <- weather_data %>%
+  ggplot(aes(x = avg_humidity, y = fct_rev(month), fill = ..x..)) +
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01, gradient_lwd = 1., bandwidth = 4) +
+  scale_fill_continuous(low = "white", high = "dark blue") +
+  ggtitle("Average humidity at station \ntokyo tokyo-kana tonokyo in 2016/17") +
+  labs(x = "Humidity", y = "", fill = "Humidity") +
+  theme_ridges(font_size = 13, grid = TRUE) +
+  theme(legend.position = "none") +
+  theme(axis.title.y = element_blank())
+
+layout <- matrix(c(1,2),1,2,byrow=TRUE)
+multiplot(p1, p2, layout=layout)
+
+```
+
+
+What we find that summers in Tokyo are quite a bit hotter but also more humid. There is a range of about 20 degrees celsius between winter and summer, and a spread of what looks like around 10 degrees within a typical month. The humidity has more variance per month but the difference between winter and summer is still significant. 
+
+
+Other weather information include the precipitation, total and deepest snowfall (all three mostly missing for this station), hours of sunlight, average wind speed, various pressures, cloud cover, and solar radiation. Here we plot some of those features over the months of the year:
+
+```{r  split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 42", out.width="100%"}
+
+p1 <- weather_data %>%
+  ggplot(aes(fct_rev(month), hours_sunlight, fill = fct_rev(month))) +
+  geom_boxplot() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  labs(x = "Month")
+
+p2 <- weather_data %>%
+  ggplot(aes(fct_rev(month), cloud_cover, fill = fct_rev(month))) +
+  geom_boxplot() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  labs(x = "Month")
+
+p3 <- weather_data %>%
+  ggplot(aes(fct_rev(month), precipitation, fill = fct_rev(month))) +
+  geom_boxplot() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_y_log10() +
+  labs(x = "Month")
+
+p4 <- weather_data %>%
+  ggplot(aes(fct_rev(month), avg_local_pressure, fill = fct_rev(month))) +
+  geom_boxplot() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_y_log10() +
+  labs(x = "Month")
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=TRUE)
+multiplot(p1, p2, p3, p4, layout=layout)
+
+```
+
+
+
+As, We can see:
+
+1) There are less number of sunlight hours in the month ofSep than in Dec, despite the significantly shorter days. This could be explained by the cloud cover plot that shows that winter is considerably less cloudy than the rest of the year. The cloud cover appears to be measured on a relative scale between 0 and 10.
+
+2) The overall precipitation seems lowest in Feb; although there is a large variance within a month and all boxes are consistent. Remember that the precipitation feature has many missing values.
+
+3)The average local pressure clearly drops during the summer, with Aug having the lowest pressure values. This is consistent with the tendency for higher precipitation during that month.
+
+WE planned to doibg some further anaylsis on weather data.
+
+Now we are going to do the unsupervised learning for weather_data. 
+
+```{r}
+BigCities <- weather_data %>%
+  arrange(desc(avg_temperature)) %>%
+  head(4000) %>%
+  select(high_temperature, low_temperature)
+city_clusts <- BigCities %>%
+  kmeans(centers = 9) %>%
+  fitted("classes") %>%
+  as.character()
+BigCities <- BigCities %>% mutate(cluster = city_clusts)
+BigCities %>% ggplot(aes(x = low_temperature, y = high_temperature)) +
+geom_point(aes(color = cluster), alpha = 0.5)
+```
+
+Now, we are going the spread weather_stations data by longitude and latitude. 
+```{r}
+weather_stations1<-
+  weather_stations%>%
+  spread(longitude,latitude)
+weather_stations1%>%
+  head(6)
+```
+
+```{r}
+apply(weather_data,2,class)
+```
+
+From this one we know the types of every variables in this data set. 
+
+```{r}
+sim_mean <- sapply(1:100, function(x) {
+  idx <- sample(1:nrow(weather_data),size = 0.8*nrow(weather_data),replace = TRUE)
+  mean(weather_data$avg_temperature[idx])
+})
+sim_mean
+```
+
